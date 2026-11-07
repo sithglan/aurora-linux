@@ -161,12 +161,14 @@ impl InitData {
                   PROT_GPU_SHARED_RW as GPU};
         // The board names its interface (the M5 Pro's or the common 26A428 one); among the M5
         // Pro's, the firmware build names the layouts.
-        let graph = board.graph.for_m5_layouts(variant.m5_layouts.ok_or(EINVAL)?);
+        let layouts = variant.m5_layouts.ok_or(EINVAL)?;
+        let graph = board.graph.for_m5_layouts(layouts);
         let profile = graph.profile;
         let layout = graph.m5_layout;
         let common26 = graph.is_common26();
         self.m5 = true;
         self.graph = graph;
+        self.set_m5_policy_layouts(layouts);
         // TA, fragment and compute share the compute work ring per priority; every
         // preparation's claim on it is counted from the first publication on.
         self.outer_credits = Some(super::outer_credit::Credits::new()?);
