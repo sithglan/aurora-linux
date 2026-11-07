@@ -70,7 +70,7 @@ impl InitData {
         // 26A428 one (0x6d0 bytes) has no such table.
         if self.graph.is_common26() { return Ok(()); }
         let private = self.object(self.cluster)?;
-        let base = m::M5_PRIVATE_LAYOUT.status_config;
+        let base = self.graph.private.status_config;
         for _ in 0..64 {
             let generation = private.word(base + 0x74c)?.load(Ordering::Acquire);
             if generation & 1 != 0 { core::hint::spin_loop(); continue; }
@@ -130,13 +130,25 @@ impl InitData {
         }
     }
 
-    pub(crate) fn build_m5(&mut self, dev: &AsahiDrmDevice, uat: &mmu::Uat,
-        id: &crate::regs::G17Id, board: &m::Board) -> Result {
+    /// Builds the M5 graph in the InitData layouts the loaded firmware build (`variant`) names.
+    pub(crate) fn build_m5(
+        &mut self,
+        dev: &AsahiDrmDevice,
+        uat: &mmu::Uat,
+        id: &crate::regs::G17Id,
+        board: &m::Board,
+        variant: &crate::g17::fw::Variant,
+    ) -> Result {
         use mmu::{PROT_FW_SHARED_RW as RW, PROT_FW_SHARED_RO as RO,
                   PROT_GPU_SHARED_RW as GPU};
+        // The board names its interface (the M5 Pro's or the common 26A428 one); among the M5
+        // Pro's, the firmware build names the layouts.
+        let graph = board.graph.for_m5_layouts(variant.m5_layouts.ok_or(EINVAL)?);
+        let profile = graph.profile;
+        let layout = graph.m5_layout;
+        let common26 = graph.is_common26();
         self.m5 = true;
-        self.graph = board.graph;
-        let common26 = board.graph.is_common26();
+        self.graph = graph;
         // TA, fragment and compute share the compute work ring per priority; every
         // preparation's claim on it is counted from the first publication on.
         self.outer_credits = Some(super::outer_credit::Credits::new()?);
@@ -146,8 +158,8 @@ impl InitData {
             KernelObject::new(dev, uat.kernel_vm(), Placement::At(address), size,
                 mmu::PROT_FW_PRIV_RW, CpuMap::WriteBack)
         };
-        let private = board.graph.private;
-        let shared = board.graph.shared;
+        let private = graph.private;
+        let shared = graph.shared;
         self.cluster = self.add(fixed(PRIVATE, private.total, RW)?)?;
         self.region_c = self.add(fixed(REGION_C, mmu::UAT_PGSZ, RO)?)?;
         self.roots = self.add(fixed(ROOTS, 0xc000, RO)?)?;
@@ -210,7 +222,7 @@ impl InitData {
                 .map_err(|_| EINVAL)?;
         } else {
             m::encode_m5_region_c(self.object_mut(self.region_c)?.bytes_mut()).map_err(|_| EINVAL)?;
-            m::encode_m5_private_cluster(PRIVATE, FWCTL,
+            m::encode_m5_private_cluster(layout, PRIVATE, FWCTL,
                 &mut self.object_mut(self.cluster)?.bytes_mut()[..private.total]).map_err(|_| EINVAL)?;
         }
         let windows = board.register_windows();
@@ -236,16 +248,17 @@ impl InitData {
         let views = m::PrimaryRegionViews {
             sentinel_high: BASE + 0xc07e_0000, alias_high: [PB, UMA],
         };
-        m::encode_m5_hw_data(board, completions, QOS, windows,
-            &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE]).map_err(|_| EINVAL)?;
-        m::set_m5_kick_shared(board,
-            &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE], KICK_SHARED)
+        let hw_data = layout.hw_data_size();
+        m::encode_m5_hw_data(layout, board, completions, QOS, windows,
+            &mut self.object_mut(self.bundle)?.bytes_mut()[..hw_data]).map_err(|_| EINVAL)?;
+        m::set_m5_kick_shared(layout, board,
+            &mut self.object_mut(self.bundle)?.bytes_mut()[..hw_data], KICK_SHARED)
             .map_err(|_| EINVAL)?;
         let masked_cores: u32 = id.core_masks.iter().map(|mask| mask.count_ones()).sum();
         let enabled_cores = if masked_cores != 0 { masked_cores }
             else { id.num_clusters.checked_mul(id.num_cores).ok_or(EOVERFLOW)? };
-        m::set_m5_enabled_cores(board,
-            &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE], enabled_cores)
+        m::set_m5_enabled_cores(layout, board,
+            &mut self.object_mut(self.bundle)?.bytes_mut()[..hw_data], enabled_cores)
             .map_err(|_| EINVAL)?;
         let bindings = m::M5PolicyBindings {
             state: PRIVATE + private.policy_state as u64, aon_ptd: aon_va, boot_timestamp: 0,
@@ -253,7 +266,7 @@ impl InitData {
         if common26 {
             m::encode_common26_bundle_policy(board, bindings, self.object_mut(self.bundle)?.bytes_mut())
         } else {
-            m::encode_m5_bundle_policy(bindings, self.object_mut(self.bundle)?.bytes_mut())
+            m::encode_m5_bundle_policy(layout, bindings, self.object_mut(self.bundle)?.bytes_mut())
         }.map_err(|_| EINVAL)?;
         // The controller configuration applies where the part's leakage calibration matches the
         // one it was made for, or on a board whose configuration holds for every part.
@@ -287,9 +300,8 @@ impl InitData {
                     [PRIVATE + private.status_config as u64, PRIVATE + private.secondary_extra_1 as u64]
                 },
             };
-            let profile = board.graph.profile;
             let channels = m::derive_channel_table_for_profile(profile, role,
-                PRIVATE + board.graph.state_grids[index] as u64,
+                PRIVATE + graph.state_grids[index] as u64,
                 instance.status_a, instance.main_config, BUNDLE);
             let offset = shared.main_config[index];
             m::encode_main_config_for_profile(profile, role, &addresses, &instance,
