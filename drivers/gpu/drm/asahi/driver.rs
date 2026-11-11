@@ -184,6 +184,10 @@ macro_rules! asahi_of_device_table {
                     ProbeConfig::G17M5
                 ),
                 (
+                    of::DeviceId::new(c"apple,agx-g17s-k116"),
+                    ProbeConfig::G17(&hw::t6050::CONFIG_K116)
+                ),
+                (
                     of::DeviceId::new(c"apple,agx-g17s"),
                     ProbeConfig::G17M5
                 ),

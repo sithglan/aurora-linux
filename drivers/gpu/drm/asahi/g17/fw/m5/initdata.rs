@@ -1582,6 +1582,15 @@ const J714_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
     (1470, 900, 900), (1578, 960, 960), (1620, 990, 990),
 ]);
 
+// K116s ADT afr-perf-states (identical to cs-perf-states), min_sram_volt 775 mV: this unit's
+// voltages, with SRAM max(775, core) as the J714 column.
+const K116_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
+    (24, 125, 775), (338, 580, 775), (486, 630, 775), (636, 650, 775),
+    (796, 690, 775), (888, 705, 775), (988, 745, 775), (1084, 770, 775),
+    (1182, 795, 795), (1278, 835, 835), (1374, 860, 860),
+    (1470, 900, 900), (1578, 960, 960), (1620, 990, 990),
+]);
+
 // J716c ADT afr-perf-states (identical to cs-perf-states). SRAM is
 // max(775, core), the rule the J714 column follows.
 const J716C_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
@@ -2607,6 +2616,16 @@ pub(crate) const J714: Board = Board {
     completion_inputs: true,
 };
 
+/// K116s (16-inch M5 Pro, OLED): the M5 Pro with the voltages of the K116s ADT. Its AON rows
+/// (g0TR, g1TR, r0TR), register windows, MCC mask (0xf) and core counts are the J714's. The
+/// J714 controller configuration stays tied to the J714 part's calibration words.
+pub(crate) const K116: Board = Board {
+    perf_states: &K116_GPU_PERF_STATES,
+    aux_perf_states: Some(&K116_AUX_PERF_STATES),
+    relative_frequency: relative_frequency(&K116_GPU_PERF_STATES, 1),
+    ..J714
+};
+
 /// M5 Max: four clusters of ten cores.
 pub(crate) const J716C: Board = Board {
     chip_id: 0x6050,
@@ -3009,6 +3028,18 @@ pub(crate) const J714_GPU_PERF_STATES: [M5PerfState; 14] = two_tables([
     (1182, 800, 800, 800, 800), (1278, 840, 840, 840, 840),
     (1374, 880, 880, 880, 880), (1470, 925, 925, 925, 925),
     (1578, 1000, 1000, 1000, 1000), (1620, 1025, 1040, 1025, 1040),
+]);
+
+// K116s ADT perf-states / perf-states-sram (two tables of 14; perf-states1 and
+// perf-states-sram1 repeat the second), mV.
+pub(crate) const K116_GPU_PERF_STATES: [M5PerfState; 14] = two_tables([
+    (0, 125, 125, 775, 775), (338, 595, 600, 775, 775),
+    (486, 625, 640, 775, 775), (636, 660, 660, 775, 775),
+    (796, 710, 710, 775, 775), (888, 720, 720, 775, 775),
+    (988, 750, 750, 775, 775), (1084, 775, 775, 775, 775),
+    (1182, 805, 805, 805, 805), (1278, 845, 845, 845, 845),
+    (1374, 865, 870, 865, 870), (1470, 910, 915, 910, 915),
+    (1578, 985, 985, 985, 985), (1620, 1025, 1025, 1025, 1025),
 ]);
 
 /// One-table states (MHz, core voltage, SRAM voltage), the rest 0.

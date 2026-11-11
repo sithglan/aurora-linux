@@ -169,6 +169,13 @@ pub(crate) const CONFIG: Config = Config {
     },
 };
 
+/// K116s (16-inch M5 Pro, OLED): the M5 Pro configuration with the K116s board tables. The
+/// ID registers cannot tell it from the J714s, so its GPU node names it.
+pub(crate) const CONFIG_K116: Config = Config {
+    m5: Some(&crate::g17::fw::m5::initdata::K116),
+    ..CONFIG
+};
+
 /// M5 Max: ID variant 4, GPU variant C, HAL generation 300 like the M5 Pro.
 pub(crate) const CONFIG_MAX: Config = Config {
     chip_id: 0x6050,
