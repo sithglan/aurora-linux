@@ -1155,7 +1155,18 @@ static int macsmc_power_probe(struct platform_device *pdev)
 		 * macOS reports no manufacture date for the battery: leave the
 		 * date out there rather than report a wrong one.
 		 */
-		if (!of_machine_is_compatible("apple,j700")) {
+		macsmc_read_identity(smc, SMC_KEY(BMDT), power->mfg_date,
+				     sizeof(power->mfg_date));
+		/*
+		 * Some SMCs (the K116s's) return a BMDT that is not six
+		 * digits; without this test every read of the date
+		 * properties fails with -EOPNOTSUPP and the core logs it.
+		 */
+		if (!of_machine_is_compatible("apple,j700") &&
+		    strnlen(power->mfg_date, sizeof(power->mfg_date)) >= 6 &&
+		    isdigit(power->mfg_date[0]) && isdigit(power->mfg_date[1]) &&
+		    isdigit(power->mfg_date[2]) && isdigit(power->mfg_date[3]) &&
+		    isdigit(power->mfg_date[4]) && isdigit(power->mfg_date[5])) {
 			props[nprops++] = POWER_SUPPLY_PROP_MANUFACTURE_YEAR;
 			props[nprops++] = POWER_SUPPLY_PROP_MANUFACTURE_MONTH;
 			props[nprops++] = POWER_SUPPLY_PROP_MANUFACTURE_DAY;
@@ -1247,8 +1258,6 @@ static int macsmc_power_probe(struct platform_device *pdev)
 				     sizeof(power->model_name));
 		macsmc_read_identity(smc, SMC_KEY(BMSN), power->serial_number,
 				     sizeof(power->serial_number));
-		macsmc_read_identity(smc, SMC_KEY(BMDT), power->mfg_date,
-				     sizeof(power->mfg_date));
 
 		apple_smc_read_u8(power->smc, SMC_KEY(BNCB), &power->num_cells);
 		power->nominal_voltage_mv = MACSMC_NOMINAL_CELL_VOLTAGE_MV * power->num_cells;
