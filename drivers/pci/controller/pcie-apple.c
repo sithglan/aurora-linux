@@ -5691,6 +5691,15 @@ static int apple_pcie_check_d0(struct pci_dev *pdev, void *data)
 	int *error = data;
 	u16 value;
 
+	/*
+	 * Only the devices that asked to stay awake keep firmware running over
+	 * the link (the N1's functions, and through them their root port). A
+	 * kernel-trained port, such as the SD reader's, suspends to D3hot like
+	 * any other and is restored by the PCI core.
+	 */
+	if (!device_awake_path(&pdev->dev))
+		return 0;
+
 	if (pci_read_config_word(pdev, PCI_VENDOR_ID, &value) ||
 	    value != pdev->vendor) {
 		*error = -ENODEV;
