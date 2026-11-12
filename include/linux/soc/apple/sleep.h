@@ -9,12 +9,18 @@
 #include <linux/compiler_types.h>
 #include <linux/errno.h>
 #include <linux/kconfig.h>
+#include <linux/suspend.h>
 #include <linux/types.h>
 
 struct device;
 struct device_node;
 
-#if IS_ENABLED(CONFIG_APPLE_SOC_SLEEP)
+/*
+ * The coprocessor and enclave registry, shared by the sleep controllers
+ * (drivers/soc/apple/sleep-registry.c). The controller bound on this SoC
+ * answers apple_sleep_commit_stops_coprocs() and runs the last stops.
+ */
+#if IS_ENABLED(CONFIG_APPLE_SLEEP_REGISTRY)
 /*
  * A coprocessor that can't be stopped until a sleep is certain, and can't be
  * restarted without one. While one is registered and not ready, a suspend is
@@ -34,12 +40,6 @@ int apple_sleep_coproc_register(struct device *dev, void __iomem *asc, bool pcie
 int apple_sleep_coproc_register_first(struct device *dev, int (*last_stop)(void *data),
 				      void *data);
 void apple_sleep_coproc_unregister(struct device *dev);
-
-/*
- * During a suspend: a driver left something the DRAM-kept wake would stall on, so this
- * sleep takes the deep path. False if no sleep driver can do that.
- */
-bool apple_sleep_request_deep_once(void);
 
 /*
  * For a registered coprocessor: the last of its stop that may still refuse the sleep, run
@@ -69,6 +69,61 @@ bool apple_sleep_coproc_stopped(struct device *dev);
  * registered refuses the sleep: stopped any earlier, a later refusal would strand it.
  */
 bool apple_sleep_commit_stops_coprocs(void);
+#else
+static inline int apple_sleep_coproc_register(struct device *dev, void __iomem *asc,
+					      bool pcie_ans, int (*last_stop)(void *data),
+					      void *data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int apple_sleep_coproc_register_first(struct device *dev,
+						    int (*last_stop)(void *data), void *data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void apple_sleep_coproc_unregister(struct device *dev)
+{
+}
+
+static inline int apple_sleep_coproc_set_last_check(struct device *dev,
+						    int (*last_check)(void *data))
+{
+	return -EOPNOTSUPP;
+}
+
+static inline int apple_sleep_enclave_register(struct device *dev, int (*tell)(void *data),
+					       void *data)
+{
+	return -EOPNOTSUPP;
+}
+
+static inline void apple_sleep_enclave_unregister(struct device *dev)
+{
+}
+
+static inline void apple_sleep_coproc_set_ready(struct device *dev, bool ready)
+{
+}
+
+static inline bool apple_sleep_coproc_stopped(struct device *dev)
+{
+	return false;
+}
+
+static inline bool apple_sleep_commit_stops_coprocs(void)
+{
+	return false;
+}
+#endif
+
+#if IS_ENABLED(CONFIG_APPLE_SOC_SLEEP)
+/*
+ * During a suspend: a driver left something the DRAM-kept wake would stall on, so this
+ * sleep takes the deep path. False if no sleep driver can do that.
+ */
+bool apple_sleep_request_deep_once(void);
 
 /*
  * The USB host sleeps in place for this sleep, as macOS's does: its always-on domain stays
@@ -171,54 +226,8 @@ void apple_sleep_restore_pins(void);
  */
 int apple_sleep_engine_reset(struct device *dev);
 #else
-static inline int apple_sleep_coproc_register(struct device *dev, void __iomem *asc,
-					      bool pcie_ans, int (*last_stop)(void *data),
-					      void *data)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline int apple_sleep_coproc_register_first(struct device *dev,
-						    int (*last_stop)(void *data), void *data)
-{
-	return -EOPNOTSUPP;
-}
-
+/* Without the T8140 controller no sleep goes deep: false, as with no sleep driver. */
 static inline bool apple_sleep_request_deep_once(void)
-{
-	return false;
-}
-
-static inline void apple_sleep_coproc_unregister(struct device *dev)
-{
-}
-
-static inline int apple_sleep_coproc_set_last_check(struct device *dev,
-						    int (*last_check)(void *data))
-{
-	return -EOPNOTSUPP;
-}
-
-static inline int apple_sleep_enclave_register(struct device *dev, int (*tell)(void *data),
-					       void *data)
-{
-	return -EOPNOTSUPP;
-}
-
-static inline void apple_sleep_enclave_unregister(struct device *dev)
-{
-}
-
-static inline void apple_sleep_coproc_set_ready(struct device *dev, bool ready)
-{
-}
-
-static inline bool apple_sleep_coproc_stopped(struct device *dev)
-{
-	return false;
-}
-
-static inline bool apple_sleep_commit_stops_coprocs(void)
 {
 	return false;
 }
@@ -316,6 +325,32 @@ static inline void apple_sleep_restore_pins(void)
 static inline int apple_sleep_engine_reset(struct device *dev)
 {
 	return -EOPNOTSUPP;
+}
+#endif
+
+/*
+ * Whether this firmware-driven suspend may end in a real power loss of the SoC, so that a
+ * driver may stop what only a power cycle brings back. A dry run, which the T6040 has, sets
+ * pm_suspend_via_firmware() to run every sleep step that can still be taken back and then
+ * refuses before the commit: there this is false, and such a stop has to be left out.
+ * Everywhere else it is pm_suspend_via_firmware().
+ *
+ * apple_sleep_last_steps(): whether the last steps that can still be taken back, but only
+ * just (the SMC's sleep commit, each coprocessor's last check), run too. A real sleep and
+ * the deepest dry run take them.
+ */
+#if IS_ENABLED(CONFIG_APPLE_SOC_SLEEP)
+bool apple_sleep_power_loss(void);
+bool apple_sleep_last_steps(void);
+#else
+static inline bool apple_sleep_power_loss(void)
+{
+	return pm_suspend_via_firmware();
+}
+
+static inline bool apple_sleep_last_steps(void)
+{
+	return pm_suspend_via_firmware();
 }
 #endif
 
