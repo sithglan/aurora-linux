@@ -2640,13 +2640,15 @@ static int alpha_transport_state(struct centauri_wifi *wifi, bool asleep)
  * already disconnected by cfg80211, its LPNA mode is firmware state 3.
  * The first fields are le16 state and u8 hint. Native sleep also includes
  * TLV 303 (value 1) and TLV 280 (the filtered event list); wake restores all
- * 91 events. The data-ring producers stay paused while this control command
+ * events. Installed Alpha 48ef6696 rejects TLV 280 lengths >= 87 and
+ * event counts >= 86, so use its 85 events rather than 26B123's 91.
+ * The data-ring producers stay paused while this control command
  * and its response use the command/management rings.
  */
 static int alpha_host_power(struct centauri_wifi *wifi, bool asleep)
 {
 	static const u8 sleep_events[] = { 24, 26, 27, 15, 51, 8, 9, 10, 84 };
-	u8 payload[104] = {}, events[92] = {}, sleep_option = 1;
+	u8 payload[98] = {}, events[86] = {}, sleep_option = 1;
 	size_t size = 3;
 	int i, ret;
 
