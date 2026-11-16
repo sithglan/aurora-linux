@@ -2257,7 +2257,9 @@ static void t8142_deep_wfi_arm(void)
 			write_sysreg_s(ARCH_TIMER_CTRL_IT_MASK, SYS_CNTP_CTL_EL02);
 			write_sysreg_s(ARCH_TIMER_CTRL_IT_MASK, SYS_CNTV_CTL_EL02);
 		}
-		write_sysreg_s(0, T8142_PMCR0);
+		/* Match the J813 test path: quiet both PMU FIQ sources. */
+		sysreg_clear_set_s(T8142_PMCR0, GENMASK(10, 8), 0);
+		sysreg_clear_set_s(T8142_UPMCR0, GENMASK(18, 16), 0);
 		isb();
 	}
 	t8142_ed_release();
