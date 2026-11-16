@@ -117,6 +117,7 @@ struct centauri_wifi {
 	u32 reply_command, channels_seen, scans_done, beacons_seen;
 	bool reply_valid, registered, configured;
 	bool stopping;
+	bool transport_paused, transport_sleep_sent;
 	bool connecting, connected, connect_event, disconnect_event;
 	bool associated, pmk_seen, pmk_matches;
 	u8 expected_pmk[32];
@@ -217,6 +218,8 @@ static int alpha_message(struct centauri_wifi *wifi, const void *message, size_t
 	u8 *descriptor;
 	unsigned long deadline = jiffies + msecs_to_jiffies(2000);
 
+	if (READ_ONCE(wifi->transport_paused))
+		return -EBUSY;
 	if (head >= 15 || size > 512)
 		return -ENOSPC;
 	memcpy(wifi->a.messages + (head + 1) * 512, message, size);
@@ -547,6 +550,8 @@ static void drain(struct centauri_wifi *wifi)
 	unsigned int ring;
 	bool posted = false;
 
+	if (READ_ONCE(wifi->transport_paused))
+		return;
 	for (ring = 2; ring <= 4; ring++) {
 		unsigned int budget = ring_size[ring];
 
@@ -724,6 +729,8 @@ static int command(struct centauri_wifi *wifi, u32 id, const void *payload, size
 	u8 *packet, *descriptor;
 	unsigned long deadline = jiffies + msecs_to_jiffies(1500);
 
+	if (READ_ONCE(wifi->transport_paused))
+		return -EBUSY;
 	if (size + 24 > BUFFER_SIZE)
 		return -EMSGSIZE;
 	if ((slot + 1) % ring_size[1] == index_read(wifi, 1, 1))
@@ -1324,6 +1331,10 @@ static void link_worker(struct work_struct *work)
 	bool disconnected;
 
 	mutex_lock(&wifi->lock);
+	if (wifi->transport_paused) {
+		mutex_unlock(&wifi->lock);
+		return;
+	}
 	drain(wifi);
 	disconnected = wifi->disconnect_event || READ_ONCE(wifi->stopping) ||
 		readl(wifi->a.bar + 8) != 2;
@@ -1345,7 +1356,8 @@ void centauri_wifi_kick(struct centauri *c)
 {
 	struct centauri_wifi *wifi = READ_ONCE(c->wifi);
 
-	if (wifi && READ_ONCE(wifi->connected) && !READ_ONCE(wifi->stopping))
+	if (wifi && READ_ONCE(wifi->connected) && !READ_ONCE(wifi->stopping) &&
+	    !READ_ONCE(wifi->transport_paused))
 		mod_delayed_work(system_percpu_wq, &wifi->link_work, 0);
 }
 
@@ -1538,6 +1550,10 @@ static netdev_tx_t net_transmit(struct sk_buff *skb, struct net_device *netdev)
 {
 	struct centauri_wifi *wifi = *(struct centauri_wifi **)netdev_priv(netdev);
 
+	if (READ_ONCE(wifi->transport_paused)) {
+		netif_stop_queue(netdev);
+		return NETDEV_TX_BUSY;
+	}
 	if (READ_ONCE(wifi->stopping) || !READ_ONCE(wifi->connected) ||
 	    skb->len < ETH_HLEN || skb->len > BUFFER_SIZE) {
 		netdev->stats.tx_dropped++;
@@ -1684,6 +1700,10 @@ static ssize_t fwlog_ack_write(struct file *file, const char __user *input,
 	if (ret)
 		return ret;
 	mutex_lock(&wifi->fwlog_lock);
+	if (READ_ONCE(wifi->transport_paused)) {
+		ret = -EBUSY;
+		goto out;
+	}
 	if (!wifi->fwlog_ready || readl(wifi->a.bar + 8) != 2) {
 		ret = -ENETDOWN;
 		goto out;
@@ -1889,6 +1909,8 @@ static int transmit_eapol_start(struct centauri_wifi *wifi)
 	u64 metadata = 0;
 	unsigned int attempt;
 
+	if (READ_ONCE(wifi->transport_paused))
+		return -EBUSY;
 	if (readl(wifi->a.bar + 8) != 2 || !(wifi->data_probe_done & BIT(3)))
 		return -ENETDOWN;
 	/* Eight independent buffers bound the probe without ring reuse. */
@@ -2556,6 +2578,114 @@ int centauri_wifi_register(struct centauri *c)
 	return 0;
 failed:
 	centauri_wifi_unregister(c);
+	return ret;
+}
+
+/*
+ * 26B123 t2026-CentauriAlpha uses BAR0 + 0x1024 for sleep_control.
+ * AirshipDK's ACIPC host-sleep handshake writes 3 and waits for status 3;
+ * wake writes 0 and waits for status 0 or 1. The peripheral-info block
+ * starts at context + 0x68, with sleep_status at +8, as on Beta.
+ * Stop every ring producer before requesting host sleep. Keep them stopped
+ * until the wake acknowledgment, including when suspend entry is refused.
+ */
+static u32 alpha_sleep_status(struct centauri_wifi *wifi)
+{
+	return le32_to_cpu(READ_ONCE(*(__le32 *)(wifi->a.context + 0x70)));
+}
+
+static int alpha_transport_state(struct centauri_wifi *wifi, bool asleep)
+{
+	u32 status;
+	int ret;
+
+	lockdep_assert_held(&wifi->lock);
+	if (readl(wifi->a.bar + 8) != 2 || readl(wifi->a.bar + 0xc) != 2)
+		return -EIO;
+	dma_wmb();
+	writel(asleep ? 3 : 0, wifi->a.bar + 0x1024);
+	ret = read_poll_timeout(alpha_sleep_status, status,
+				(asleep ? status == 3 : status <= 1) ||
+				readl(wifi->a.bar + 8) != 2,
+				100, 2000000, false, wifi);
+	dma_rmb();
+	if (readl(wifi->a.bar + 8) != 2)
+		ret = -EIO;
+	dev_info(&wifi->control->pdev->dev,
+		 "TEST: Alpha ACIPC host %s: ret=%d status=%u exec=%u ipc=%u\n",
+		 asleep ? "sleep" : "wake", ret, status,
+		 readl(wifi->a.bar + 8), readl(wifi->a.bar + 0xc));
+	return ret;
+}
+
+static int alpha_resume_locked(struct centauri_wifi *wifi)
+{
+	int ret;
+
+	lockdep_assert_held(&wifi->lock);
+	if (!wifi->transport_sleep_sent)
+		return 0;
+	ret = alpha_transport_state(wifi, false);
+	if (ret)
+		return ret;
+	wifi->transport_sleep_sent = false;
+	mutex_lock(&wifi->fwlog_lock);
+	WRITE_ONCE(wifi->transport_paused, false);
+	mutex_unlock(&wifi->fwlog_lock);
+	if (wifi->connected && !READ_ONCE(wifi->stopping)) {
+		if (netif_running(wifi->netdev))
+			netif_wake_queue(wifi->netdev);
+		mod_delayed_work(system_percpu_wq, &wifi->link_work, 0);
+	}
+	return 0;
+}
+
+int centauri_wifi_resume(struct centauri *c)
+{
+	struct centauri_wifi *wifi = c->wifi;
+	int ret;
+
+	if (!wifi || !of_machine_is_compatible("apple,j813"))
+		return 0;
+	mutex_lock(&wifi->lock);
+	ret = alpha_resume_locked(wifi);
+	mutex_unlock(&wifi->lock);
+	return ret;
+}
+
+int centauri_wifi_suspend(struct centauri *c)
+{
+	struct centauri_wifi *wifi = c->wifi;
+	int ret, restore;
+
+	if (!wifi || !of_machine_is_compatible("apple,j813"))
+		return 0;
+	mutex_lock(&wifi->lock);
+	if (wifi->transport_paused || wifi->connecting || wifi->scan_request ||
+	    READ_ONCE(wifi->stopping)) {
+		mutex_unlock(&wifi->lock);
+		return -EBUSY;
+	}
+	mutex_lock(&wifi->fwlog_lock);
+	WRITE_ONCE(wifi->transport_paused, true);
+	mutex_unlock(&wifi->fwlog_lock);
+	mutex_unlock(&wifi->lock);
+	netif_tx_disable(wifi->netdev);
+	cancel_work_sync(&wifi->scan_work);
+	cancel_work_sync(&wifi->connect_work);
+	cancel_delayed_work_sync(&wifi->link_work);
+
+	mutex_lock(&wifi->lock);
+	wifi->transport_sleep_sent = true;
+	ret = alpha_transport_state(wifi, true);
+	if (ret) {
+		restore = alpha_resume_locked(wifi);
+		if (restore)
+			dev_err(&c->pdev->dev,
+				"Alpha transport remains paused after refused sleep: %d\n",
+				restore);
+	}
+	mutex_unlock(&wifi->lock);
 	return ret;
 }
 
