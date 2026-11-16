@@ -1593,12 +1593,72 @@ static int apple_sleep_cpus_hold(struct apple_sleep *s)
 }
 
 /* A nonzero result must mean no SLEEP was sent; post-send errors are fatal. */
+/*
+ * TEST (J813): no SEP driver on this board, so nothing asks the enclave to sleep, and at
+ * macOS's commit its domain reads DEV_DISABLE with actual 0 (0x1000270f; Linux: 0x1f0020ff).
+ * Send the SEP driver's own SLEEP request by hand on the enclave's mailbox (ascwrap v6 +
+ * 0x8000): control endpoint, tag 8, type 0x0c, param 2; its answer is 0x010800 in the low
+ * 24 bits, and the enclave then gates its own domain. Note 0x44: +2 the answer (1 good,
+ * 2 wrong, 3 none), +4 the gate (1 set, 2 not).
+ */
+#define SEP_MBOX_BASE		0x30a608000ULL
+#define SEP_SLEEP_MSG0		0x020c0800ULL
+#define SEP_SLEEP_REPLY		0x010800ULL
+static const struct apple_sleep_soc t8142_sleep_soc;
+#define t8142_sleep_soc_ref t8142_sleep_soc
+static bool sleep_sep_raw = true;
+module_param(sleep_sep_raw, bool, 0644);
+static u64 sleep_sep_reply;
+static u32 sleep_sep_ps;
+
+static void apple_sleep_sep_raw(struct apple_sleep *s)
+{
+	void __iomem *mb;
+	u32 ctl, ps = 0;
+	u8 answer = 3, gate = 2;
+	int ret;
+
+	if (!READ_ONCE(sleep_sep_raw) || s->soc != &t8142_sleep_soc_ref)
+		return;
+	mb = ioremap(SEP_MBOX_BASE, 0x4000);
+	if (!mb)
+		return;
+	if (readl_poll_timeout_atomic(mb + 0x110, ctl, !(ctl & BIT(16)), 10, 100000))
+		goto out;
+	/* Whatever the enclave left for nobody, before its answer */
+	while (!(readl(mb + 0x114) & BIT(17))) {
+		readq(mb + 0x830);
+		readq(mb + 0x838);
+	}
+	writeq(SEP_SLEEP_MSG0, mb + 0x800);
+	writeq(0, mb + 0x808);
+	ret = readl_poll_timeout_atomic(mb + 0x114, ctl, !(ctl & BIT(17)), 10, 5000000);
+	if (!ret) {
+		sleep_sep_reply = readq(mb + 0x830);
+		readq(mb + 0x838);
+		answer = (sleep_sep_reply & 0xffffff) == SEP_SLEEP_REPLY ? 1 : 2;
+	}
+	ret = readl_poll_timeout_atomic(s->ps + s->soc->ps.sep, ps, ps & PS_DEV_DISABLE, 10,
+					5000000);
+	gate = ret ? 2 : 1;
+out:
+	sleep_sep_ps = ps;
+	iounmap(mb);
+	sleep_note_at(s, 2, answer);
+	sleep_note_at(s, 4, gate);
+	sleep_note(s, 0x44);
+	dev_info(s->dev, "TEST SEP SLEEP by hand: answer %u (%#llx), gate %u (ps %#x)\n",
+		 answer, sleep_sep_reply, gate, ps);
+}
+
 static int apple_sleep_enclave_stop(struct apple_sleep *s)
 {
 	int ret;
 
-	if (!apple_sleep_enclave.stop)
+	if (!apple_sleep_enclave.stop) {
+		apple_sleep_sep_raw(s);
 		return 0;
+	}
 	ret = apple_sleep_enclave.stop(apple_sleep_enclave.data);
 	if (ret)
 		dev_err(s->dev, "refused before SEP SLEEP was sent: %d\n", ret);
