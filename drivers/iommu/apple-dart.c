@@ -438,6 +438,7 @@ struct apple_dart {
 	u32 fw_handoff : 1;
 	u32 tunnel_state_saved : 1;
 	u32 tunnel_state_restored : 1;
+	bool early_link_restored;
 	/* Clocked by its host's port: the host resumes it after a real sleep. */
 	u32 host_resumes : 1;
 	/* Its host's sleep entry stopped the streams: reset even if the registers kept their values. */
@@ -6587,6 +6588,7 @@ static __maybe_unused int apple_dart_suspend(struct device *dev)
 		return 0;
 
 	dart->tunnel_state_restored = false;
+	dart->early_link_restored = false;
 	/* The display sleep's owner checks retained state before its firmware can run. */
 	if (dart->m5_sleep_owner)
 		return 0;
@@ -6799,6 +6801,10 @@ static __maybe_unused int apple_dart_resume(struct device *dev)
 	unsigned int sid, idx;
 	int ret;
 
+	/* The platform restored it before releasing the radio's PERST#. */
+	if (dart->early_link_restored)
+		return 0;
+
 	/* Do not enable DMA or overwrite its snapshot behind the display sleep's owner. */
 	if (dart->m5_sleep_owner)
 		return 0;
@@ -6917,11 +6923,41 @@ static __maybe_unused int apple_dart_resume(struct device *dev)
 	return ret;
 }
 
+/*
+ * TEST: a platform wake restores the port clocks before releasing its endpoint.
+ * Use the system suspend snapshot once, then let noirq update runtime PM only.
+ */
+int apple_dart_resume_before_link(struct device *dev)
+{
+	struct apple_dart *dart = dev_get_drvdata(dev);
+	int ret;
+
+	if (dev->driver != &apple_dart_driver.driver || !dart)
+		return -ENODEV;
+	if (!pm_resume_via_firmware() || dart->hw->type != DART_T8110 ||
+	    dart->locked || dart->tunneled || dart->managed_sids || dart->sleep_saved ||
+	    dart->m5_sleep_owner || dart->cio_active || dart->host_resumes ||
+	    dart->host_off || dart->power_retained || dart->dispext ||
+	    dart->isp_host || dart->preserve_display || apple_dart_has_borrowed(dart))
+		return -EOPNOTSUPP;
+	ret = apple_dart_resume(dev);
+	if (!ret)
+		dart->early_link_restored = true;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_dart_resume_before_link);
+
 static __maybe_unused int apple_dart_resume_noirq(struct device *dev)
 {
 	struct apple_dart *dart = dev_get_drvdata(dev);
 	bool domain_cycled = false;
 	int ret;
+
+	if (dart->early_link_restored) {
+		ret = pm_runtime_force_resume(dev);
+		dart->early_link_restored = false;
+		return ret;
+	}
 
 	if (READ_ONCE(dart->m5_sleep_owner))
 		return 0;

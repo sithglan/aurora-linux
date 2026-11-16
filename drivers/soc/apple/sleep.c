@@ -1047,6 +1047,7 @@ struct apple_sleep {
 	unsigned int perf_dcs_from;
 	/* With radio_retrain: the radio's PCIe host, and its port's blocks and tables */
 	struct device_node *radio_host_np;
+	struct device *radio_dart;
 	void __iomem *radio_port;
 	void __iomem *radio_lane;
 	void __iomem *radio_cfg;
@@ -4121,6 +4122,10 @@ static void sleep_radio_perst(struct apple_sleep *s, bool asserted)
  * crashed driver or a chip found in ROM, after two tries of function-warm_reset (SMC
  * 'bpli'). Never run after a sleep.
  */
+static bool sleep_radio_dart_early;
+module_param_named(radio_dart_early, sleep_radio_dart_early, bool, 0644);
+MODULE_PARM_DESC(radio_dart_early, "TEST: restore the radio DART before releasing PERST#");
+
 static int apple_sleep_radio_train(struct apple_sleep *s)
 {
 	void __iomem *port = s->radio_port, *lane = s->radio_lane, *cfg = s->radio_cfg;
@@ -4152,6 +4157,13 @@ static int apple_sleep_radio_train(struct apple_sleep *s)
 	writel(readl(lane) | RADIO_LANE_EN1, lane);
 	/* T(refclk-to-PERST#) */
 	udelay(1000);
+
+	if (READ_ONCE(sleep_radio_dart_early)) {
+		ret = s->radio_dart ? apple_dart_resume_before_link(s->radio_dart) : -ENODEV;
+		dev_info(s->dev, "TEST radio DART before PERST release: %d\n", ret);
+		if (ret)
+			return ret;
+	}
 
 	writel(readl(port + RADIO_PORT_PERST) | BIT(0), port + RADIO_PORT_PERST);
 	sleep_radio_perst(s, false);
@@ -6601,11 +6613,30 @@ static void apple_sleep_late_scope_finish(void)
 	sleep_ans_late_release(false);
 }
 
+static void apple_sleep_put_device(void *dev);
+
 static int apple_sleep_prepare(void)
 {
 	struct apple_sleep *s = apple_sleep;
 	static u8 attempts;
 	int i;
+
+	if (READ_ONCE(sleep_radio_dart_early) && !s->radio_dart) {
+		struct device_node *np = s->radio_host_np ?
+			of_parse_phandle(s->radio_host_np, "iommu-map", 1) : NULL;
+		struct platform_device *dart = np ? of_find_device_by_node(np) : NULL;
+
+		of_node_put(np);
+		if (!dart)
+			return -ENODEV;
+		if (!device_is_bound(&dart->dev)) {
+			put_device(&dart->dev);
+			return -ENODEV;
+		}
+		if (devm_add_action_or_reset(s->dev, apple_sleep_put_device, &dart->dev))
+			return -ENOMEM;
+		s->radio_dart = &dart->dev;
+	}
 
 	/* Every device .suspend has run: no owner registers after this. */
 	sleep_ans_late_close();
