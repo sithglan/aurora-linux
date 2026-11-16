@@ -7498,6 +7498,8 @@ static const struct apple_sleep_word t8142_gate_off[] = {
 /* T8142's, from the J815 tree. GFX's word is in its own block, not "ps". */
 static const struct apple_sleep_gate_coproc t8142_gate_coprocs[] = {
 	{ "/soc/dcp@286e00000", true, 0x10000 },
+	{ "/soc/dcp@506e00000", true, 0x428 },
+	{ "/soc/dcp@3aae00000", true, 0x3b8 },
 	{ "/soc/pmp@380500000", true },
 	{ "/soc/nvme@4c5cc0000" },	{ "/soc/mtp@394600000" },
 	{ "/soc/aop@390c00000" },	{ "/soc/smc@38c600000" },
@@ -7547,9 +7549,9 @@ static const struct apple_sleep_soc t8142_sleep_soc = {
 	.spmi_gen4 = true,
 	.boot_wfi_delay_ms = 3,
 	.wake_optional = true,
-	/* The J815 tree has no external DCP: DISPEXT0/1 are 0x428/0x418/0x308, 0x3b8/0x3a8/0x2b8. */
-	.ndisp = 1,
-	.display_order = { 0 },
+	/* TEST: J813 owns all three display coprocessors. */
+	.ndisp = 3,
+	.display_order = { 1, 2, 0 },
 	/* E, P (ADT soc-clusters) */
 	.cluster_cpu = { 0x0, 0x4 },
 	.ncluster_cpu = 2,
@@ -7577,6 +7579,8 @@ static const struct apple_sleep_soc t8142_sleep_soc = {
 	.ps = {
 		.disp = {
 			{ 0x10000, 0x318, 0x290 },
+			{ 0x428, 0x418, 0x308 },
+			{ 0x3b8, 0x3a8, 0x2b8 },
 		},
 		.sio_cpu = 0x328,
 		.sep = 0xc00,
