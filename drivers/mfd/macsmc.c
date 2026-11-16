@@ -650,6 +650,9 @@ static int apple_smc_probe(struct platform_device *pdev)
 		of_device_is_compatible(dev->of_node, "apple,t6050-smc");
 	if (smc->saved_enabled)
 		smc->wake_reasons = apple_smc_j714s_wake_reasons;
+	/* J813's late notice needs the bounded, IRQ-independent transport too. */
+	if (of_machine_is_compatible("apple,j813"))
+		smc->saved_enabled = true;
 	smc->sram_base = devm_platform_get_and_ioremap_resource(pdev, 1, &smc->sram);
 	if (IS_ERR(smc->sram_base))
 		return dev_err_probe(dev, PTR_ERR(smc->sram_base), "Failed to map SRAM region");
@@ -876,26 +879,6 @@ static int apple_smc_sleep_commit(struct apple_smc *smc)
 	if (!ret)
 		mdelay(SMC_SLEEP_IDLE_MS);
 
-	return ret;
-}
-
-/*
- * J813 keeps the existing command sequence, but the platform calls it only
- * after ANS and the other peers have completed their final idle handshakes.
- * IRQs are off, as in the ordinary noirq callback. No timing receipt is used
- * by this experimental non-saved-context path.
- */
-static int apple_smc_sleep_after_peers(void *data, u64 *sent, u64 *ack)
-{
-	struct apple_smc *smc = data;
-	int ret;
-
-	*sent = *ack = 0;
-	if (!irqs_disabled() || !smc->sleep_warned || smc->ap_notified)
-		return -EINVAL;
-	apple_smc_set_polled(smc, true);
-	ret = apple_smc_sleep_commit(smc);
-	apple_smc_set_polled(smc, false);
 	return ret;
 }
 
@@ -1150,7 +1133,8 @@ static int apple_smc_sleep_saved_begin(void *data)
 	struct apple_smc *smc = data;
 	int ret;
 
-	if (!smc->saved_enabled || !smc->sleep_policy)
+	if (!smc->saved_enabled ||
+	    (!smc->sleep_policy && !apple_sleep_smc_defer_notice()))
 		return -EOPNOTSUPP;
 	if (!mutex_trylock(&smc->mutex))
 		return -EBUSY;
@@ -1356,6 +1340,42 @@ static const struct apple_sleep_smc_saved_ops apple_smc_saved_ops = {
 	.pmvc = apple_smc_sleep_saved_pmvc,
 };
 
+/*
+ * J813 retains its existing MBSE/AP sequence and delay floors. The transport
+ * is the saved lane: no scheduler, jiffies, IRQ worker or SRAM reuse is needed
+ * after the peer stops. Unrelated notifications are retained until resume.
+ */
+static int apple_smc_sleep_after_peers(void *data, u64 *sent, u64 *ack)
+{
+	struct apple_smc *smc = data;
+	int ret;
+
+	lockdep_assert_held(&smc->mutex);
+	*sent = *ack = 0;
+	if (!irqs_disabled() || !smc->saved_scope || !smc->sleep_warned ||
+	    smc->ap_notified)
+		return -EINVAL;
+
+	smc->saved_committed = true;
+	ret = apple_smc_saved_write_u32(smc, SMC_KEY(MBSE), SMC_KEY(slpa));
+	if (ret)
+		goto out;
+	mdelay(SMC_SLEEP_ARM_MS);
+	smc->ap_notified = true;
+	ret = apple_rtkit_m5_saved_ap_power(smc->rtk, false, sent, ack);
+	if (!ret)
+		mdelay(SMC_SLEEP_IDLE_MS);
+out:
+	smc->saved_notice_error = ret;
+	return ret;
+}
+
+static const struct apple_sleep_smc_saved_ops apple_smc_j813_saved_ops = {
+	.begin = apple_smc_sleep_saved_begin,
+	.late_notice = apple_smc_sleep_after_peers,
+	.end = apple_smc_sleep_saved_end,
+};
+
 static int apple_smc_prepare_policy(struct apple_smc *smc)
 {
 	const struct apple_sleep_smc_policy *p = smc->sleep_policy;
@@ -1422,7 +1442,7 @@ static int apple_smc_sleep_prepare(struct apple_smc *smc)
 		apple_smc_sleep_warn(smc);
 
 	if (apple_sleep_smc_defer_notice())
-		return apple_sleep_smc_register(smc->dev, apple_smc_sleep_after_peers, smc);
+		return apple_sleep_smc_register_saved(smc->dev, &apple_smc_j813_saved_ops, smc);
 	return 0;
 }
 
@@ -1566,7 +1586,7 @@ static int apple_smc_resume_noirq(struct device *dev)
 	if (smc->saved_enabled && (smc->saved_recovery || smc->saved_pending ||
 				   smc->saved_fault))
 		return smc->saved_restore_error ?: smc->saved_fault ?: -EBUSY;
-	if (smc->saved_enabled && smc->sleep_policy) {
+	if (smc->saved_enabled && (smc->sleep_policy || smc->saved_wake)) {
 		if (smc->saved_wake) {
 			apple_smc_set_polled(smc, true);
 			apple_smc_sleep_wake(smc);

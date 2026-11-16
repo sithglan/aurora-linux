@@ -1775,8 +1775,7 @@ int apple_sleep_smc_register(struct device *dev,
 	struct apple_sleep *s = apple_sleep;
 	guard(mutex)(&apple_sleep_smc_lock);
 
-	if (!s || (!s->soc->smc_policy && !apple_sleep_smc_defer_notice()) ||
-	    !pm_suspend_via_firmware())
+	if (!s || !s->soc->smc_policy || !pm_suspend_via_firmware())
 		return -EOPNOTSUPP;
 	if (!late_notice || s->smc.saved_ops || (s->smc.dev && s->smc.dev != dev))
 		return -EBUSY;
@@ -1794,8 +1793,8 @@ int apple_sleep_smc_register_saved(struct device *dev,
 	struct apple_sleep *s = apple_sleep;
 	guard(mutex)(&apple_sleep_smc_lock);
 
-	if (!s || !s->soc->early_context || !s->soc->smc_policy ||
-	    !pm_suspend_via_firmware())
+	if (!s || ((!s->soc->early_context || !s->soc->smc_policy) &&
+		   !apple_sleep_smc_defer_notice()) || !pm_suspend_via_firmware())
 		return -EOPNOTSUPP;
 	if (!ops || !ops->begin || !ops->late_notice || !ops->end || s->smc.dev)
 		return -EBUSY;
@@ -5760,7 +5759,8 @@ static int apple_sleep_smc_late_notice(struct apple_sleep *s)
 		return 0;
 	if (!s->smc.dev || !s->smc.late_notice)
 		return -ENODEV;
-	if (s->soc->early_context && (!s->smc.saved_ops || !s->smc.held))
+	if ((s->soc->early_context || apple_sleep_smc_defer_notice()) &&
+	    (!s->smc.saved_ops || !s->smc.held))
 		return -EBUSY;
 	return s->smc.late_notice(s->smc.data, &s->smc_idle_sent, &s->smc_idle_ack);
 }
@@ -6558,7 +6558,8 @@ static int apple_sleep_smc_scope_begin(void)
 	struct apple_sleep *s = apple_sleep;
 	int ret = 0;
 
-	if (!s->soc->early_context || !s->soc->smc_policy)
+	if ((!s->soc->early_context || !s->soc->smc_policy) &&
+	    !apple_sleep_smc_defer_notice())
 		return 0;
 	mutex_lock(&apple_sleep_smc_lock);
 	if (!s->smc.saved_ops || !s->smc.dev) {
