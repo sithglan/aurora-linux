@@ -5465,6 +5465,9 @@ static int apple_sleep_prepare(void)
 	sleep_note_at(s, 0, PMU_NOTE_MAGIC);
 	sleep_note_at(s, 2, 0);
 	sleep_note_at(s, 3, ++attempts);
+	/* TEST ONLY: distinguish this wake from retained markers of an earlier attempt. */
+	sleep_note_at(s, 6, 0);
+	sleep_note_at(s, 16, 0xb0);
 	sleep_note(s, 0x02);
 
 	/* With an encoder's domain linked, genpd has it off once the encoders are. */
