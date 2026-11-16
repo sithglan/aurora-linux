@@ -8,6 +8,9 @@ void apple_cpu_wfi(void);
 #ifdef CONFIG_ARCH_APPLE
 /* Called from smp_prepare_boot_cpu(): before the boot CPU's first idle. */
 void apple_wfi_quirk_init(void);
+void apple_idle_debug_arm(void);
+void apple_idle_debug_dump(void);
+void apple_idle_debug_poll(void);
 #else
 static inline void apple_wfi_quirk_init(void) { }
 #endif

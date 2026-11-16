@@ -6,6 +6,7 @@
 #include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/irqflags.h>
+#include <linux/printk.h>
 
 #include <asm/apple-idle.h>
 #include <asm/barrier.h>
@@ -86,6 +87,64 @@ void __init apple_wfi_quirk_init(void)
 	}
 }
 
+/* TEST ONLY: capture CPU0 timer state without waking it with an IPI. */
+static bool idle_debug;
+static bool idle_debug_poll_cpu0;
+
+void apple_idle_debug_poll(void)
+{
+	WRITE_ONCE(idle_debug_poll_cpu0, true);
+}
+static struct {
+	u64 entries, exits, pct, vct, pctl, vctl, pcval, vcval, deep, hcr, cnthctl, vmgate;
+} idle_debug_last;
+
+void apple_idle_debug_dump(void)
+{
+	pr_info("TEST CPU0 idle entries=%llu exits=%llu pct=%#llx vct=%#llx pctl=%#llx vctl=%#llx pcval=%#llx vcval=%#llx deep=%#llx now=%#llx hcr=%#llx cnthctl=%#llx vmgate=%#llx\n",
+		idle_debug_last.entries, idle_debug_last.exits,
+		idle_debug_last.pct, idle_debug_last.vct,
+		idle_debug_last.pctl, idle_debug_last.vctl,
+		idle_debug_last.pcval, idle_debug_last.vcval,
+		idle_debug_last.deep, read_sysreg(cntpct_el0),
+		idle_debug_last.hcr, idle_debug_last.cnthctl, idle_debug_last.vmgate);
+}
+
+void apple_idle_debug_arm(void)
+{
+	idle_debug_last.entries = 0;
+	idle_debug_last.exits = 0;
+	WRITE_ONCE(idle_debug, true);
+	pr_info("TEST resume CPU%u timer pct=%#llx vct=%#llx pctl=%#llx vctl=%#llx pcval=%#llx vcval=%#llx deep=%#llx\n",
+		smp_processor_id(), read_sysreg(cntpct_el0), read_sysreg(cntvct_el0),
+		read_sysreg(cntp_ctl_el0), read_sysreg(cntv_ctl_el0),
+		read_sysreg(cntp_cval_el0), read_sysreg(cntv_cval_el0),
+		read_sysreg_s(sys_reg(3, 5, 15, 6, 2)));
+}
+
+static void apple_idle_debug_enter(void)
+{
+	if (!READ_ONCE(idle_debug) || smp_processor_id())
+		return;
+	idle_debug_last.pct = read_sysreg(cntpct_el0);
+	idle_debug_last.vct = read_sysreg(cntvct_el0);
+	idle_debug_last.pctl = read_sysreg(cntp_ctl_el0);
+	idle_debug_last.vctl = read_sysreg(cntv_ctl_el0);
+	idle_debug_last.pcval = read_sysreg(cntp_cval_el0);
+	idle_debug_last.vcval = read_sysreg(cntv_cval_el0);
+	idle_debug_last.deep = read_sysreg_s(sys_reg(3, 5, 15, 6, 2));
+	idle_debug_last.hcr = read_sysreg(hcr_el2);
+	idle_debug_last.cnthctl = read_sysreg(cnthctl_el2);
+	idle_debug_last.vmgate = read_sysreg_s(sys_reg(3, 5, 15, 1, 3));
+	idle_debug_last.entries++;
+}
+
+static void apple_idle_debug_exit(void)
+{
+	if (READ_ONCE(idle_debug) && !smp_processor_id())
+		idle_debug_last.exits++;
+}
+
 static __always_inline bool apple_wfi_needs_save(void)
 {
 	return unlikely(READ_ONCE(apple_wfi_loses_regs));
@@ -112,6 +171,13 @@ void __cpuidle cpu_do_idle(void)
 
 	arm_cpuidle_save_irq_context(&context);
 
+	if (READ_ONCE(idle_debug_poll_cpu0) && !smp_processor_id()) {
+		apple_idle_debug_enter();
+		apple_idle_debug_exit();
+		arm_cpuidle_restore_irq_context(&context);
+		return;
+	}
+
 	if (likely(idle == ARM64_IDLE_WFI)) {
 		if (apple_wfi_needs_save()) {
 			/*
@@ -120,7 +186,9 @@ void __cpuidle cpu_do_idle(void)
 			 * them, even when the same task resumes on this CPU.
 			 */
 			fpsimd_save_and_flush_cpu_state();
+			apple_idle_debug_enter();
 			apple_cpu_wfi();
+			apple_idle_debug_exit();
 		} else {
 			dsb(sy);
 			wfi();

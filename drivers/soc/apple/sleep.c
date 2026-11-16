@@ -60,6 +60,9 @@
 #include <linux/of_platform.h>
 #include <linux/percpu.h>
 #include <linux/sched/task_stack.h>
+#include <linux/sched/debug.h>
+#include <linux/nmi.h>
+#include <asm/apple-idle.h>
 #include <asm/sections.h>
 #include <asm/smp_plat.h>
 #include <asm/suspend.h>
@@ -5511,6 +5514,40 @@ static bool apple_sleep_smc_woke_alone(struct apple_sleep *s)
 	return any;
 }
 
+/* TEST ONLY: diagnose a resume hung before userspace can run. */
+static bool resume_cpu0_poll;
+module_param(resume_cpu0_poll, bool, 0644);
+
+static bool resume_task_dump;
+module_param(resume_task_dump, bool, 0644);
+
+void apple_gpio_debug_arm(void);
+void apple_gpio_debug_dump(void);
+void apple_aic_debug_arm(void);
+void apple_aic_debug_dump(void);
+
+static void sleep_dump_resume_tasks(struct work_struct *work)
+{
+	int i;
+
+	for (i = 0; i < 3; i++) {
+		apple_idle_debug_dump();
+		apple_aic_debug_dump();
+		{
+			void (*dump)(void) = symbol_get(apple_gpio_debug_dump);
+
+			if (dump) {
+				dump();
+				symbol_put(apple_gpio_debug_dump);
+			}
+		}
+		mdelay(1000);
+	}
+	show_state_filter(TASK_UNINTERRUPTIBLE);
+	trigger_all_cpu_backtrace();
+}
+static DECLARE_DELAYED_WORK(resume_dump_work, sleep_dump_resume_tasks);
+
 static void apple_sleep_report(void)
 {
 	struct apple_sleep *s = apple_sleep;
@@ -5528,6 +5565,24 @@ static void apple_sleep_report(void)
 		return;
 	s->returned = false;
 	s->smc_woke_alone = apple_sleep_smc_woke_alone(s);
+	if (READ_ONCE(resume_cpu0_poll)) {
+		apple_idle_debug_poll();
+		pr_info("TEST CPU0 skips idle WFI after resume\n");
+	}
+	if (READ_ONCE(resume_task_dump) && cpu_online(1)) {
+		apple_idle_debug_arm();
+		apple_aic_debug_arm();
+		{
+			void (*arm)(void) = symbol_get(apple_gpio_debug_arm);
+
+			if (arm) {
+				arm();
+				symbol_put(apple_gpio_debug_arm);
+			}
+		}
+		queue_delayed_work_on(1, system_wq, &resume_dump_work, 5 * HZ);
+	}
+
 
 	dev_info(s->dev, "back from sleep, boot object resumes %llu -> %llu\n",
 		 s->resumes_before, s->resumes_after);

@@ -526,17 +526,32 @@ static void aic_irq_eoi(struct irq_data *d)
 		aic_irq_unmask(d);
 }
 
+/* TEST ONLY: inspect a stuck boot CPU without sending it an IPI. */
+static bool aic_debug;
+static struct {
+	u64 count, done, pct, pctl, vctl, gpctl, gvctl, ipi, pmcr, upmcr;
+	u64 irq_count, irq_done, irq_pct, irq_event, events;
+} aic_debug_last;
+
 static void __exception_irq_entry aic_handle_irq(struct pt_regs *regs)
 {
 	struct aic_irq_chip *ic = aic_irqc;
 	u32 event, type, irq;
 
+	if (READ_ONCE(aic_debug) && !smp_processor_id()) {
+		aic_debug_last.irq_count++;
+		aic_debug_last.irq_pct = read_sysreg(cntpct_el0);
+	}
 	do {
 		/*
 		 * We cannot use a relaxed read here, as reads from DMA buffers
 		 * need to be ordered after the IRQ fires.
 		 */
 		event = readl(ic->event + ic->info.event);
+		if (READ_ONCE(aic_debug) && !smp_processor_id()) {
+			aic_debug_last.irq_event = event;
+			aic_debug_last.events++;
+		}
 		type = FIELD_GET(AIC_EVENT_TYPE, event);
 		irq = FIELD_GET(AIC_EVENT_NUM, event);
 
@@ -568,6 +583,9 @@ static void __exception_irq_entry aic_handle_irq(struct pt_regs *regs)
 			sysreg_clear_set_s(SYS_ICH_HCR_EL2, ICH_HCR_EL2_En, 0);
 		}
 	}
+	if (READ_ONCE(aic_debug) && !smp_processor_id())
+		aic_debug_last.irq_done++;
+
 }
 
 static int aic_irq_set_affinity(struct irq_data *d,
@@ -739,8 +757,40 @@ static void aic_fiq_eoi(struct irq_data *d)
 		 ARCH_TIMER_CTRL_IT_STAT)) ==                                  \
 	 (ARCH_TIMER_CTRL_ENABLE | ARCH_TIMER_CTRL_IT_STAT))
 
+void apple_aic_debug_arm(void)
+{
+	aic_debug_last.count = 0;
+	aic_debug_last.done = 0;
+	WRITE_ONCE(aic_debug, true);
+}
+
+void apple_aic_debug_dump(void)
+{
+	pr_info("TEST CPU0 FIQ count=%llu done=%llu pct=%#llx pctl=%#llx vctl=%#llx gpctl=%#llx gvctl=%#llx ipi=%#llx pmcr=%#llx upmcr=%#llx IRQcount=%llu IRQdone=%llu IRQpct=%#llx IRQevent=%#llx events=%llu\n",
+		READ_ONCE(aic_debug_last.count), READ_ONCE(aic_debug_last.done),
+		READ_ONCE(aic_debug_last.pct), READ_ONCE(aic_debug_last.pctl),
+		READ_ONCE(aic_debug_last.vctl), READ_ONCE(aic_debug_last.gpctl),
+		READ_ONCE(aic_debug_last.gvctl), READ_ONCE(aic_debug_last.ipi),
+		READ_ONCE(aic_debug_last.pmcr), READ_ONCE(aic_debug_last.upmcr),
+		READ_ONCE(aic_debug_last.irq_count), READ_ONCE(aic_debug_last.irq_done),
+		READ_ONCE(aic_debug_last.irq_pct), READ_ONCE(aic_debug_last.irq_event),
+		READ_ONCE(aic_debug_last.events));
+}
+
 static void __exception_irq_entry aic_handle_fiq(struct pt_regs *regs)
 {
+	if (READ_ONCE(aic_debug) && !smp_processor_id()) {
+		aic_debug_last.count++;
+		aic_debug_last.pct = read_sysreg(cntpct_el0);
+		aic_debug_last.pctl = read_sysreg(cntp_ctl_el0);
+		aic_debug_last.vctl = read_sysreg(cntv_ctl_el0);
+		aic_debug_last.gpctl = read_sysreg_s(SYS_CNTP_CTL_EL02);
+		aic_debug_last.gvctl = read_sysreg_s(SYS_CNTV_CTL_EL02);
+		aic_debug_last.ipi = read_sysreg_s(SYS_IMP_APL_IPI_SR_EL1);
+		aic_debug_last.pmcr = read_sysreg_s(SYS_IMP_APL_PMCR0_EL1);
+		aic_debug_last.upmcr = read_sysreg_s(SYS_IMP_APL_UPMCR0_EL1);
+	}
+
 	/*
 	 * It would be really nice if we had a system register that lets us get
 	 * the FIQ source state without having to peek down into sources...
@@ -797,6 +847,9 @@ static void __exception_irq_entry aic_handle_fiq(struct pt_regs *regs)
 		sysreg_clear_set_s(SYS_IMP_APL_UPMCR0_EL1, UPMCR0_IMODE,
 				   FIELD_PREP(UPMCR0_IMODE, UPMCR0_IMODE_OFF));
 	}
+	if (READ_ONCE(aic_debug) && !smp_processor_id())
+		aic_debug_last.done++;
+
 }
 
 static int aic_fiq_set_type(struct irq_data *d, unsigned int type)
@@ -1190,6 +1243,7 @@ static int aic_syscore_suspend(void *data)
 	aic_sleep.config = aic_ic_read(ic, AIC2_CONFIG);
 	aic_sleep.timeout = aic_ic_read(ic, AIC2_TIMEOUT);
 	aic_sleep.cluster_prio = aic_ic_read(ic, AIC2_CLUSTER_PRIO);
+
 
 	for (die = 0; die < ic->nr_die; die++) {
 		for (i = 0; i < ic->nr_irq; i++)

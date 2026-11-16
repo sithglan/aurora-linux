@@ -7469,6 +7469,17 @@ int apple_dart_display_streams(struct device *dev, u32 streams, bool on, bool fl
 	u32 status;
 	int ret;
 
+	/* TEST ONLY: compare the external DCP mappings across J813's first real wakes. */
+	if (of_machine_is_compatible("apple,j813") &&
+	    streams == (BIT(23) | BIT(24)) &&
+	    (on || !READ_ONCE(dart->display_dark))) {
+		for_each_set_bit(sid, &bits, BITS_PER_TYPE(streams))
+			dev_info(dev, "TEST DCP %s SID%u TCR=%#x TTBR0=%#x\n",
+				 on ? "on" : "off", sid,
+				 readl(dart->regs + DART_TCR(dart, sid)),
+				 readl(dart->regs + DART_TTBR(dart, sid, 0)));
+	}
+
 	if (on) {
 		apple_dart_gapf_protect(dart);
 		dart->sleep_flushed = false;
