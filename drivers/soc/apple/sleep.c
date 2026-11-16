@@ -4124,7 +4124,7 @@ static void sleep_radio_perst(struct apple_sleep *s, bool asserted)
  */
 static bool sleep_radio_dart_early;
 module_param_named(radio_dart_early, sleep_radio_dart_early, bool, 0644);
-MODULE_PARM_DESC(radio_dart_early, "TEST: restore the radio DART before releasing PERST#");
+MODULE_PARM_DESC(radio_dart_early, "TEST: restore the radio DART after link-up, before endpoint config");
 
 static int apple_sleep_radio_train(struct apple_sleep *s)
 {
@@ -4158,13 +4158,6 @@ static int apple_sleep_radio_train(struct apple_sleep *s)
 	/* T(refclk-to-PERST#) */
 	udelay(1000);
 
-	if (READ_ONCE(sleep_radio_dart_early)) {
-		ret = s->radio_dart ? apple_dart_resume_before_link(s->radio_dart) : -ENODEV;
-		dev_info(s->dev, "TEST radio DART before PERST release: %d\n", ret);
-		if (ret)
-			return ret;
-	}
-
 	writel(readl(port + RADIO_PORT_PERST) | BIT(0), port + RADIO_PORT_PERST);
 	sleep_radio_perst(s, false);
 	ret = readl_poll_timeout_atomic(port + RADIO_PORT_PIPE_STS, val, val & BIT(0), 1,
@@ -4192,6 +4185,13 @@ static int apple_sleep_radio_train(struct apple_sleep *s)
 
 	/* The root port's buses as the loader set them; the PCI core restores the rest. */
 	writel(0x00010100, cfg + RADIO_CFG_BUSES);
+	if (READ_ONCE(sleep_radio_dart_early)) {
+		ret = s->radio_dart ? apple_dart_resume_early(s->radio_dart) : -ENODEV;
+		dev_info(s->dev, "TEST radio DART after link ready: %d\n", ret);
+		if (ret)
+			return ret;
+	}
+
 	/* PCIe's 100 ms from PERST# release to the first configuration request */
 	mdelay(100);
 

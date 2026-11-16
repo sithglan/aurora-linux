@@ -6801,7 +6801,7 @@ static __maybe_unused int apple_dart_resume(struct device *dev)
 	unsigned int sid, idx;
 	int ret;
 
-	/* The platform restored it before releasing the radio's PERST#. */
+	/* The platform restored it before the radio endpoints' config restore. */
 	if (dart->early_link_restored)
 		return 0;
 
@@ -6924,10 +6924,10 @@ static __maybe_unused int apple_dart_resume(struct device *dev)
 }
 
 /*
- * TEST: a platform wake restores the port clocks before releasing its endpoint.
+ * TEST: a platform wake has trained the link before device noirq resume.
  * Use the system suspend snapshot once, then let noirq update runtime PM only.
  */
-int apple_dart_resume_before_link(struct device *dev)
+int apple_dart_resume_early(struct device *dev)
 {
 	struct apple_dart *dart = dev_get_drvdata(dev);
 	int ret;
@@ -6945,7 +6945,7 @@ int apple_dart_resume_before_link(struct device *dev)
 		dart->early_link_restored = true;
 	return ret;
 }
-EXPORT_SYMBOL_GPL(apple_dart_resume_before_link);
+EXPORT_SYMBOL_GPL(apple_dart_resume_early);
 
 static __maybe_unused int apple_dart_resume_noirq(struct device *dev)
 {
