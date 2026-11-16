@@ -6,6 +6,13 @@
  * dart-sep; PMGR SEP word +0xc00 (always on, the enclave gates it itself), GPIO +0x120.
  */
 
+/ {
+	aliases {
+		/* aura's dt_set_sep(): sepfw reserved, the boot-object manifests published */
+		sep = &sep;
+	};
+};
+
 &pmgr {
 	ps_gpio: power-controller@120 {
 		compatible = "apple,t8142-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
