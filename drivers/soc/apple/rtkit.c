@@ -74,6 +74,11 @@ enum {
 #define APPLE_RTKIT_POLLED_STEP_US 10
 #define APPLE_RTKIT_POLLED_LOOPS   20000
 
+/* TEST ONLY: bounded extension of the final polled power-state ACK wait. */
+static uint polled_idle_wait_ms = 200;
+module_param(polled_idle_wait_ms, uint, 0644);
+MODULE_PARM_DESC(polled_idle_wait_ms, "Test polled idle ACK wait, clamped to 200..2000 ms");
+
 #define APPLE_RTKIT_CRASHLOG_CRASH 1
 
 #define APPLE_RTKIT_BUFFER_REQUEST	1
@@ -3007,26 +3012,29 @@ static int apple_rtkit_polled_state(struct apple_rtkit *rtk, u8 type, unsigned i
 			FIELD_PREP(APPLE_RTKIT_MGMT_PWR_STATE, APPLE_RTKIT_PWR_STATE_IDLE),
 		.msg1 = APPLE_RTKIT_EP_MGMT,
 	};
-	int i;
+	unsigned int loops = clamp_t(uint, READ_ONCE(polled_idle_wait_ms), 200, 2000) *
+			     (1000 / APPLE_RTKIT_POLLED_STEP_US);
+	int i, ret;
 
 	for (i = 0; !apple_mbox_send_ready(rtk->mbox); i++) {
 		if (i == APPLE_RTKIT_POLLED_LOOPS)
 			return -ETIMEDOUT;
 		udelay(APPLE_RTKIT_POLLED_STEP_US);
 	}
-	if (READ_ONCE(rtk->ans_hold)) {
-		int ret = apple_mbox_send(rtk->mbox, msg, true);
-
-		if (ret)
-			return ret;
-	} else {
-		apple_mbox_send(rtk->mbox, msg, true);
+	ret = apple_mbox_send(rtk->mbox, msg, true);
+	if (ret) {
+		dev_err(rtk->dev, "RTKit: polled state %u send failed: %d\n", type, ret);
+		return ret;
 	}
 
-	for (i = 0; i < APPLE_RTKIT_POLLED_LOOPS; i++) {
+	for (i = 0; i < loops; i++) {
 		apple_mbox_poll(rtk->mbox);
-		if (READ_ONCE(*state) == APPLE_RTKIT_PWR_STATE_IDLE)
+		if (READ_ONCE(*state) == APPLE_RTKIT_PWR_STATE_IDLE) {
+			if (i >= APPLE_RTKIT_POLLED_LOOPS)
+				dev_info(rtk->dev, "TEST polled state %u ACK after %u us\n",
+					 type, i * APPLE_RTKIT_POLLED_STEP_US);
 			return 0;
+		}
 		udelay(APPLE_RTKIT_POLLED_STEP_US);
 		*us += APPLE_RTKIT_POLLED_STEP_US;
 	}
