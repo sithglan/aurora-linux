@@ -50,6 +50,4 @@
 	};
 };
 
-&sep_dart {
-	status = "okay";
-};
+/* sep_dart stays disabled: apple-sep enables it with its DMA window (dt.rs). */
