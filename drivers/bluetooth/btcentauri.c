@@ -45,6 +45,11 @@
 #define CEN_AUX_BASE 0x20000
 #define CEN_CAPTURE_SIZE SZ_1M
 
+/* TEST ONLY: keep one binary for the resume-state A/B. */
+static bool restore_sleep_msi = true;
+module_param(restore_sleep_msi, bool, 0644);
+MODULE_PARM_DESC(restore_sleep_msi, "Test restoring the DMA-backed MSI capability after sleep");
+
 static bool arm_le_data_rings = true;
 module_param(arm_le_data_rings, bool, 0444);
 MODULE_PARM_DESC(arm_le_data_rings, "Arm native Beta LE rings for radio bring-up");
@@ -1150,7 +1155,7 @@ static int cen_resume_noirq(struct device *dev)
 	 * Centauri's DMA-backed MSI mailbox is programmed directly by the
 	 * Control driver. Restore it before interrupts and polling resume.
 	 */
-	if (bt->sleep_msi.saved && !pdev->msi_enabled) {
+	if (restore_sleep_msi && bt->sleep_msi.saved && !pdev->msi_enabled) {
 		pci_write_config_word(pdev, cap + PCI_MSI_FLAGS,
 				      bt->sleep_msi.flags & ~PCI_MSI_FLAGS_ENABLE);
 		pci_write_config_dword(pdev, cap + PCI_MSI_ADDRESS_LO, bt->sleep_msi.lo);
