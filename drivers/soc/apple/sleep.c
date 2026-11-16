@@ -1644,8 +1644,14 @@ static void apple_sleep_sep_raw(struct apple_sleep *s)
 out:
 	sleep_sep_ps = ps;
 	iounmap(mb);
-	sleep_note_at(s, 2, answer);
-	sleep_note_at(s, 4, gate);
+	/* Their own bytes, past the notes that later steps overwrite: 0x8310.. */
+	sleep_note_at(s, 8, answer);
+	sleep_note_at(s, 9, gate);
+	sleep_note_at(s, 10, ps >> 8);
+	sleep_note_at(s, 11, ps);
+	sleep_note_at(s, 12, sleep_sep_reply);
+	sleep_note_at(s, 13, sleep_sep_reply >> 8);
+	sleep_note_at(s, 14, sleep_sep_reply >> 16);
 	sleep_note(s, 0x44);
 	dev_info(s->dev, "TEST SEP SLEEP by hand: answer %u (%#llx), gate %u (ps %#x)\n",
 		 answer, sleep_sep_reply, gate, ps);
