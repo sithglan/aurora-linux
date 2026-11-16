@@ -57,4 +57,13 @@
 	};
 };
 
-/* sep_dart stays disabled: apple-sep enables it with its DMA window (dt.rs). */
+/*
+ * The SEP consumes the high IOVA on the wire, as in the ADT's vm-base-0.
+ * An offset on a low DMA window moves only the DART mapping, not the address
+ * sent in the shared-memory registration. Leave the DART disabled until
+ * apple-sep enables it (dt.rs), with this window already described.
+ */
+&sep_dart {
+	apple,dma-range = /bits/ 64 <0x10000004000 0xffff0000>;
+	apple,dma-offset = /bits/ 64 <0x0>;
+};
