@@ -5950,8 +5950,12 @@ static int apple_sleep_enter(suspend_state_t state)
 		return apple_sleep_enter_early(s);
 
 	/* Refuse while all peer stops are still reversible. */
-	if (apple_sleep_smc_defer_notice() && (!s->smc.dev || !s->smc.late_notice))
-		return -ENODEV;
+	if (apple_sleep_smc_defer_notice()) {
+		if (!s->smc.dev || !s->smc.late_notice)
+			return -ENODEV;
+		if (!s->smc.saved_ops || !s->smc.held)
+			return -EBUSY;
+	}
 
 	sleep_note(s, 0x10);
 	ret = apple_sleep_refuse(s);
@@ -6779,6 +6783,8 @@ static const struct platform_suspend_ops apple_sleep_ops = {
 	.valid = apple_sleep_valid,
 	.begin = apple_sleep_begin,
 	.prepare = apple_sleep_prepare,
+	.prepare_late = apple_sleep_smc_scope_begin,
+	.finish = apple_sleep_smc_scope_end,
 	.enter = apple_sleep_enter,
 	.wake = apple_sleep_report,
 	.end = apple_sleep_end,
