@@ -7063,6 +7063,51 @@ static void t8142_cpm_on(struct apple_sleep *s)
 	}
 }
 
+/* TEST: J813 macOS leaves PMC/SPMI automatic and SPI_P powered. */
+static bool t8142_match_clocks;
+module_param(t8142_match_clocks, bool, 0644);
+
+static void t8142_clock_policy(struct apple_sleep *s)
+{
+	static const u32 aon[] = { 0x60, 0x68, 0x78 };
+	int i;
+
+	if (!READ_ONCE(t8142_match_clocks))
+		return;
+	/* No active display AUX user in this diagnostic. */
+	sleep_ps_lower(s, 0x1a8);
+	sleep_ps_lower(s, 0x1a0);
+	if (sleep_ps_raise(s, 0x390))
+		dev_warn(s->dev, "TEST SPI_P did not power on\n");
+	writel((readl(s->ps + 0x140) & ~PS_FLAGS) | PS_AUTO_ENABLE,
+	       s->ps + 0x140);
+	for (i = 0; i < ARRAY_SIZE(aon); i++)
+		writel((readl(s->ps_aon + aon[i]) & ~PS_FLAGS) | PS_AUTO_ENABLE,
+		       s->ps_aon + aon[i]);
+}
+
+/* TEST: read the already-described PS words after peripheral shutdown. */
+static bool t8142_dump_ps;
+module_param(t8142_dump_ps, bool, 0644);
+
+static void t8142_dump_power(struct apple_sleep *s)
+{
+	const struct apple_sleep_words *soc = &s->soc->ps_all;
+	const struct apple_sleep_words *aon = &s->soc->ps_aon_all;
+	int i;
+
+	if (!READ_ONCE(t8142_dump_ps))
+		return;
+	dev_info(s->dev, "TEST PS snapshot before WD2 and the final memory/cluster sequence\n");
+	for (i = 0; i < soc->count; i++)
+		pr_info("S2RPS soc %#x %#010x\n", soc->offset[i],
+			readl(s->ps + soc->offset[i]));
+	for (i = 0; i < aon->count; i++)
+		pr_info("S2RPS aon %#x %#010x\n", aon->offset[i],
+			readl(s->ps_aon + aon->offset[i]));
+	dev_info(s->dev, "TEST PS snapshot complete\n");
+}
+
 /* T8132's, with T8142's ATC0 words; ANS's PCIe block in AppleT8142PCIe's order. */
 static void t8142_lower_io(struct apple_sleep *s)
 {
@@ -7080,6 +7125,8 @@ static void t8142_lower_io(struct apple_sleep *s)
 		apple_sleep_lower_apcie(s);
 		s->ans_off_ret = sleep_ps_wait_off(s, s->soc->ps.ans);
 	}
+	t8142_clock_policy(s);
+	t8142_dump_power(s);
 	sleep_note(s, 0x63);
 }
 
@@ -7520,11 +7567,11 @@ static const u32 t8142_ps_aon_wake_order[] = {
  */
 static const u32 t8142_ps_macos_off[] = {
 	0xc010, 0xc008, 0xc000, 0x8020, 0x8018, 0x8010, 0x8008, 0x8000, 0x510, 0x508,
-	0x500, 0x4f8, 0x4f0, 0x4e8, 0x4e0, 0x4d8, 0x460, 0x458, 0x450, 0x448,
-	0x440, 0x438, 0x430, 0x400, 0x3f8, 0x3f0, 0x3e8, 0x3e0, 0x3d8, 0x3d0,
-	0x3c8, 0x3c0, 0x3a0, 0x368, 0x360, 0x358, 0x350, 0x348, 0x320, 0x310,
+	0x500, 0x4f8, 0x4f0, 0x4e8, 0x4e0, 0x4d8, 0x460, 0x450,
+	0x440, 0x400, 0x3f8, 0x3f0, 0x3e8, 0x3e0, 0x3d8, 0x3d0,
+	0x3c8, 0x3c0, 0x3a0, 0x360, 0x350, 0x320, 0x310,
 	0x2f8, 0x2e8, 0x2e0, 0x2d8, 0x2d0, 0x2c0, 0x2a8, 0x2a0, 0x298, 0x1b0,
-	0x198, 0x190, 0x178, 0x170,
+	0x198, 0x190,
 };
 
 static const u32 t8142_ps_aon_macos_off[] = {
