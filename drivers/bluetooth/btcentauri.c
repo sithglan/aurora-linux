@@ -45,6 +45,11 @@
 #define CEN_AUX_BASE 0x20000
 #define CEN_CAPTURE_SIZE SZ_1M
 
+/* TEST: quiesce ACIPC before link loss, with bounded firmware ACK waits. */
+static bool native_transport_sleep;
+module_param(native_transport_sleep, bool, 0644);
+MODULE_PARM_DESC(native_transport_sleep, "Test the native ACIPC host sleep handshake");
+
 /* TEST: native Write Local Host State, after HCI suspend and before link loss. */
 static bool native_host_sleep;
 module_param(native_host_sleep, bool, 0644);
@@ -148,6 +153,7 @@ struct cen_bt {
 	u8 hrb_last_link_type;
 	u32 scan_dup_rewritten, accept_list_hidden;
 	bool host_sleep_sent;
+	bool transport_paused, transport_sleep_sent;
 	/* MSI backed by a DMA buffer, outside the PCI core's IRQ allocation. */
 	struct {
 		u32 lo, hi;
@@ -557,7 +563,7 @@ static void cen_poll(struct work_struct *work)
 	int budget = CEN_RX_SLOTS;
 
 	mutex_lock(&bt->lock);
-	if (!bt->running)
+	if (!bt->running || bt->transport_paused)
 		goto unlock;
 	if (readl(bt->bar + 0x18) != 2 || readl(bt->bar) != 2) {
 		/* Preserve already completed diagnostics after abort, without posting
@@ -931,6 +937,11 @@ static int cen_status_show(struct seq_file *s, void *unused)
 		   readl(bt->bar + 0x18), readl(bt->bar), bt->running,
 		   bt->tx_head, cen_tail(bt, 1), bt->rx_head, cen_tail(bt, 7),
 		   skb_queue_len(&bt->txq));
+	seq_printf(s, "peripheral_exec=%u peripheral_ipc=%u sleep_status=%u transport_paused=%u\n",
+		   le32_to_cpu(READ_ONCE(*(__le32 *)(bt->arena + 0x68))),
+		   le32_to_cpu(READ_ONCE(*(__le32 *)(bt->arena + 0x6c))),
+		   le32_to_cpu(READ_ONCE(*(__le32 *)(bt->arena + 0x70))),
+		   bt->transport_paused);
 	seq_printf(s, "commands=%u events=%u tx_bytes=%u rx_bytes=%u tx_errors=%u rx_errors=%u\n",
 		   bt->hdev->stat.cmd_tx, bt->hdev->stat.evt_rx,
 		   bt->hdev->stat.byte_tx, bt->hdev->stat.byte_rx,
@@ -1144,16 +1155,52 @@ static int cen_host_state(struct cen_bt *bt, bool asleep)
 	return ret;
 }
 
+/*
+ * 26B123 AirshipDK: Beta sleep_control is BAR0 + 0x1078. Host sleep
+ * writes 3 and waits for peripheral_info.sleep_status == 3; wake writes
+ * 0 and waits for status 0 (active) or 1 (device sleep). The peripheral
+ * info block is at context + 0x68, with sleep_status at +8.
+ *
+ * TEST ONLY: qualify this protocol with the installed Linux firmware.
+ * All ring doorbells must stay paused until the wake acknowledgment.
+ */
+static u32 cen_sleep_status(struct cen_bt *bt)
+{
+	return le32_to_cpu(READ_ONCE(*(__le32 *)(bt->arena + 0x70)));
+}
+
+static int cen_transport_state(struct cen_bt *bt, bool asleep)
+{
+	u32 status;
+	int ret;
+
+	if (readl(bt->bar + 0x18) != 2 || readl(bt->bar) != 2)
+		return -EIO;
+	dma_wmb();
+	writel(asleep ? 3 : 0, bt->bar + 0x1078);
+	ret = read_poll_timeout(cen_sleep_status, status,
+				asleep ? status == 3 : status <= 1,
+				100, 2000000, false, bt);
+	dma_rmb();
+	dev_info(&bt->pdev->dev,
+		 "TEST ACIPC host %s: ret=%d status=%u exec=%u ipc=%u\n",
+		 asleep ? "sleep" : "wake", ret, status,
+		 readl(bt->bar + 0x18), readl(bt->bar));
+	return ret;
+}
+
+static int cen_resume(struct device *dev);
+
 static int cen_suspend(struct device *dev)
 {
 	struct cen_bt *bt = pci_get_drvdata(to_pci_dev(dev));
 	struct pci_dev *pdev = bt->pdev;
 	u16 flags;
-	int cap;
+	int cap, ret;
 
 	bt->host_sleep_sent = false;
 	if (READ_ONCE(native_host_sleep) && READ_ONCE(bt->running)) {
-		int ret = cen_host_state(bt, true);
+		ret = cen_host_state(bt, true);
 
 		if (ret) {
 			cen_host_state(bt, false);
@@ -1162,7 +1209,16 @@ static int cen_suspend(struct device *dev)
 		bt->host_sleep_sent = true;
 	}
 
+	mutex_lock(&bt->lock);
+	bt->transport_paused = true;
+	mutex_unlock(&bt->lock);
 	cancel_delayed_work_sync(&bt->poll);
+	if (READ_ONCE(native_transport_sleep) && bt->ipc_requested) {
+		bt->transport_sleep_sent = true;
+		ret = cen_transport_state(bt, true);
+		if (ret)
+			goto undo;
+	}
 	bt->sleep_msi.saved = false;
 	cap = pci_find_capability(pdev, PCI_CAP_ID_MSI);
 	if (cap && !pdev->msi_enabled &&
@@ -1178,7 +1234,12 @@ static int cen_suspend(struct device *dev)
 	dev_info(dev, "TEST Beta suspend exec=%x ipc=%x fallback MSI saved=%d\n",
 		 readl(bt->bar + 0x18), readl(bt->bar), bt->sleep_msi.saved);
 	device_set_awake_path(dev);
-	return pci_save_state(pdev);
+	ret = pci_save_state(pdev);
+	if (!ret)
+		return 0;
+undo:
+	cen_resume(dev);
+	return ret;
 }
 
 static int cen_resume_noirq(struct device *dev)
@@ -1208,8 +1269,16 @@ static int cen_resume_noirq(struct device *dev)
 static int cen_resume(struct device *dev)
 {
 	struct cen_bt *bt = pci_get_drvdata(to_pci_dev(dev));
+	int ret;
 
+	if (bt->transport_sleep_sent) {
+		ret = cen_transport_state(bt, false);
+		if (ret)
+			return ret;
+		bt->transport_sleep_sent = false;
+	}
 	mutex_lock(&bt->lock);
+	bt->transport_paused = false;
 	if (bt->running)
 		schedule_delayed_work(&bt->poll, 0);
 	mutex_unlock(&bt->lock);
