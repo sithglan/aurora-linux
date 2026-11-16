@@ -1186,7 +1186,7 @@ unblock:
 	return ret;
 }
 
-static int apple_smc_sleep_saved_end(void *data)
+static int apple_smc_sleep_saved_release(void *data, bool wake_ap)
 {
 	struct apple_smc *smc = data;
 	int ret, restore = 0;
@@ -1199,7 +1199,7 @@ static int apple_smc_sleep_saved_end(void *data)
 	/* Bounded reconciliation; never release pending ownership on timeout. */
 	if (!ret && smc->saved_pending)
 		ret = apple_smc_saved_wait_reply(smc);
-	if (smc->ap_notified) {
+	if (wake_ap && smc->ap_notified) {
 		restore = apple_rtkit_m5_saved_ap_power(smc->rtk, true, NULL, NULL);
 		if (!restore) {
 			smc->ap_notified = false;
@@ -1219,6 +1219,23 @@ static int apple_smc_sleep_saved_end(void *data)
 	apple_rtkit_m5_saved_end(smc->rtk);
 	/* Original refusal stays a refusal; this result describes restoration. */
 	return ret;
+}
+
+static int apple_smc_sleep_saved_end(void *data)
+{
+	return apple_smc_sleep_saved_release(data, true);
+}
+
+/*
+ * J813's ordinary wake notice belongs in macsmc's resume_noirq, after the
+ * device dependencies have resumed. Platform wake precedes every noirq
+ * device callback; an AP ON there can wake the radio before its DMA path.
+ * Release the bounded transport here, retaining ap_notified for the usual
+ * noirq wake callback. A refused entry never posted AP IDLE.
+ */
+static int apple_smc_j813_saved_end(void *data)
+{
+	return apple_smc_sleep_saved_release(data, false);
 }
 
 /* Readiness is a returning operation BEFORE SEP/ANS/PMP stop. A drained
@@ -1373,7 +1390,7 @@ out:
 static const struct apple_sleep_smc_saved_ops apple_smc_j813_saved_ops = {
 	.begin = apple_smc_sleep_saved_begin,
 	.late_notice = apple_smc_sleep_after_peers,
-	.end = apple_smc_sleep_saved_end,
+	.end = apple_smc_j813_saved_end,
 };
 
 static int apple_smc_prepare_policy(struct apple_smc *smc)
