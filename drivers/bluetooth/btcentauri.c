@@ -137,6 +137,13 @@ struct cen_bt {
 	u32 hrb_connection_events;
 	u8 hrb_last_link_type;
 	u32 scan_dup_rewritten, accept_list_hidden;
+	/* MSI backed by a DMA buffer, outside the PCI core's IRQ allocation. */
+	struct {
+		u32 lo, hi;
+		u16 flags, data;
+		u8 cap;
+		bool saved;
+	} sleep_msi;
 };
 
 static u16 cen_tail(struct cen_bt *bt, u16 ring)
@@ -1107,10 +1114,51 @@ static void cen_remove(struct pci_dev *pdev)
 static int cen_suspend(struct device *dev)
 {
 	struct cen_bt *bt = pci_get_drvdata(to_pci_dev(dev));
+	struct pci_dev *pdev = bt->pdev;
+	u16 flags;
+	int cap;
 
 	cancel_delayed_work_sync(&bt->poll);
+	bt->sleep_msi.saved = false;
+	cap = pci_find_capability(pdev, PCI_CAP_ID_MSI);
+	if (cap && !pdev->msi_enabled &&
+	    !pci_read_config_word(pdev, cap + PCI_MSI_FLAGS, &flags) &&
+	    (flags & PCI_MSI_FLAGS_ENABLE) && (flags & PCI_MSI_FLAGS_64BIT)) {
+		bt->sleep_msi.cap = cap;
+		bt->sleep_msi.flags = flags;
+		bt->sleep_msi.saved =
+			!pci_read_config_dword(pdev, cap + PCI_MSI_ADDRESS_LO, &bt->sleep_msi.lo) &&
+			!pci_read_config_dword(pdev, cap + PCI_MSI_ADDRESS_HI, &bt->sleep_msi.hi) &&
+			!pci_read_config_word(pdev, cap + PCI_MSI_DATA_64, &bt->sleep_msi.data);
+	}
+	dev_info(dev, "TEST Beta suspend exec=%x ipc=%x fallback MSI saved=%d\n",
+		 readl(bt->bar + 0x18), readl(bt->bar), bt->sleep_msi.saved);
 	device_set_awake_path(dev);
-	return pci_save_state(to_pci_dev(dev));
+	return pci_save_state(pdev);
+}
+
+static int cen_resume_noirq(struct device *dev)
+{
+	struct cen_bt *bt = pci_get_drvdata(to_pci_dev(dev));
+	struct pci_dev *pdev = bt->pdev;
+	int cap = bt->sleep_msi.cap;
+
+	dev_info(dev, "TEST Beta noirq exec=%x ipc=%x fallback MSI saved=%d\n",
+		 readl(bt->bar + 0x18), readl(bt->bar), bt->sleep_msi.saved);
+	/*
+	 * PERST clears MSI. The PCI core only restores vectors it allocated;
+	 * Centauri's DMA-backed MSI mailbox is programmed directly by the
+	 * Control driver. Restore it before interrupts and polling resume.
+	 */
+	if (bt->sleep_msi.saved && !pdev->msi_enabled) {
+		pci_write_config_word(pdev, cap + PCI_MSI_FLAGS,
+				      bt->sleep_msi.flags & ~PCI_MSI_FLAGS_ENABLE);
+		pci_write_config_dword(pdev, cap + PCI_MSI_ADDRESS_LO, bt->sleep_msi.lo);
+		pci_write_config_dword(pdev, cap + PCI_MSI_ADDRESS_HI, bt->sleep_msi.hi);
+		pci_write_config_word(pdev, cap + PCI_MSI_DATA_64, bt->sleep_msi.data);
+		pci_write_config_word(pdev, cap + PCI_MSI_FLAGS, bt->sleep_msi.flags);
+	}
+	return 0;
 }
 
 static int cen_resume(struct device *dev)
@@ -1124,7 +1172,10 @@ static int cen_resume(struct device *dev)
 	return 0;
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(cen_pm_ops, cen_suspend, cen_resume);
+static const struct dev_pm_ops cen_pm_ops = {
+	SYSTEM_SLEEP_PM_OPS(cen_suspend, cen_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(NULL, cen_resume_noirq)
+};
 
 static const struct pci_device_id cen_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_APPLE, 0x1903) },
