@@ -259,6 +259,7 @@ struct apple_nvme {
 	/* This suspend is firmware-driven: ANS will lose power at its end. */
 	bool sleep_stop;
 	bool sleep_idled;
+	bool sleep_rx_held;
 	u32 sleep_csts;
 	/* ANS came back across a sleep, or failed to. reset_work picks these up. */
 	bool sleep_restarted;
@@ -366,6 +367,11 @@ static bool sleep_untested;
 module_param(sleep_untested, bool, 0444);
 MODULE_PARM_DESC(sleep_untested,
 		 "Stop ANS for a deep sleep where that path is untested (default 0)");
+
+/* TEST ONLY: drain receive work before the final polled idle handoff. */
+static bool sleep_rx_drain;
+module_param(sleep_rx_drain, bool, 0644);
+MODULE_PARM_DESC(sleep_rx_drain, "Test draining ANS mailbox work before polled sleep");
 
 static_assert(sizeof(struct nvme_command) == 64);
 static_assert(sizeof(struct apple_nvmmu_tcb) == 128);
@@ -2994,7 +3000,7 @@ static int apple_nvme_resume_early(struct device *dev)
 		return apple_nvme_m5_resume_early(anv);
 
 	if (!anv->hw->needs_ioq_registers || !anv->suspended || !anv->sleep_idled)
-		return 0;
+		goto release_rx;
 	anv->sleep_idled = false;
 	if (anv->sleep_stop)
 		apple_sleep_coproc_set_ready(dev, false);
@@ -3010,10 +3016,15 @@ static int apple_nvme_resume_early(struct device *dev)
 	if (ret) {
 		dev_crit(dev, "ANS restart after sleep failed: %d\n", ret);
 		anv->sleep_failed = true;
-		return 0;
+		goto release_rx;
 	}
 	WRITE_ONCE(anv->sleep_restarting, true);
 
+release_rx:
+	if (anv->sleep_rx_held) {
+		apple_rtkit_resume_rx(anv->rtk);
+		anv->sleep_rx_held = false;
+	}
 	return 0;
 }
 
@@ -3246,9 +3257,28 @@ static int apple_nvme_suspend(struct device *dev)
 	return ret;
 }
 
+/*
+ * TEST ONLY: no new IRQ receive work may appear after this drain. Incoming
+ * notifications stay in the FIFO for the final interrupt-disabled poller.
+ * No power-state message is sent here; a refused suspend only releases RX.
+ */
+static int apple_nvme_suspend_late(struct device *dev)
+{
+	struct apple_nvme *anv = dev_get_drvdata(dev);
+
+	if (!READ_ONCE(sleep_rx_drain) || !anv->sleep_stop || anv->hw->m5_sleep)
+		return 0;
+
+	apple_rtkit_hold_rx(anv->rtk);
+	anv->sleep_rx_held = true;
+	apple_rtkit_flush_rx(anv->rtk);
+	dev_info(dev, "TEST ANS receive work drained before polled idle\n");
+	return 0;
+}
+
 static const struct dev_pm_ops apple_nvme_pm_ops = {
 	SYSTEM_SLEEP_PM_OPS(apple_nvme_suspend, apple_nvme_resume)
-	LATE_SYSTEM_SLEEP_PM_OPS(NULL, apple_nvme_resume_early)
+	LATE_SYSTEM_SLEEP_PM_OPS(apple_nvme_suspend_late, apple_nvme_resume_early)
 };
 
 static const struct apple_nvme_hw apple_nvme_t8015_hw = {
