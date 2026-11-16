@@ -45,6 +45,11 @@
 #define CEN_AUX_BASE 0x20000
 #define CEN_CAPTURE_SIZE SZ_1M
 
+/* TEST: native Write Local Host State, after HCI suspend and before link loss. */
+static bool native_host_sleep;
+module_param(native_host_sleep, bool, 0644);
+MODULE_PARM_DESC(native_host_sleep, "Test native Bluetooth host sleep/awake hints");
+
 /* TEST ONLY: keep one binary for the resume-state A/B. */
 static bool restore_sleep_msi = true;
 module_param(restore_sleep_msi, bool, 0644);
@@ -142,6 +147,7 @@ struct cen_bt {
 	u32 hrb_connection_events;
 	u8 hrb_last_link_type;
 	u32 scan_dup_rewritten, accept_list_hidden;
+	bool host_sleep_sent;
 	/* MSI backed by a DMA buffer, outside the PCI core's IRQ allocation. */
 	struct {
 		u32 lo, hi;
@@ -1116,12 +1122,45 @@ static void cen_remove(struct pci_dev *pdev)
  * bus mastering off, and the next poll stopped the transport for good) and
  * the PCIe host powered. Polling pauses across the sleep.
  */
+/*
+ * The recovered HostAwakeVSC method inverts its boolean before opcode 0xfda0:
+ * awake = 00 00, asleep = 01 00. Only the awake form was previously tested.
+ */
+static int cen_host_state(struct cen_bt *bt, bool asleep)
+{
+	const u8 state[2] = { asleep, 0 };
+	struct sk_buff *skb;
+	int ret;
+
+	skb = hci_cmd_sync(bt->hdev, 0xfda0, sizeof(state), state, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb)) {
+		ret = PTR_ERR(skb);
+	} else {
+		ret = skb->len < 1 ? -EPROTO : -bt_to_errno(skb->data[0]);
+		kfree_skb(skb);
+	}
+	dev_info(&bt->pdev->dev, "TEST native host %s: %d\n",
+		 asleep ? "asleep" : "awake", ret);
+	return ret;
+}
+
 static int cen_suspend(struct device *dev)
 {
 	struct cen_bt *bt = pci_get_drvdata(to_pci_dev(dev));
 	struct pci_dev *pdev = bt->pdev;
 	u16 flags;
 	int cap;
+
+	bt->host_sleep_sent = false;
+	if (READ_ONCE(native_host_sleep) && READ_ONCE(bt->running)) {
+		int ret = cen_host_state(bt, true);
+
+		if (ret) {
+			cen_host_state(bt, false);
+			return ret;
+		}
+		bt->host_sleep_sent = true;
+	}
 
 	cancel_delayed_work_sync(&bt->poll);
 	bt->sleep_msi.saved = false;
@@ -1174,6 +1213,10 @@ static int cen_resume(struct device *dev)
 	if (bt->running)
 		schedule_delayed_work(&bt->poll, 0);
 	mutex_unlock(&bt->lock);
+	if (bt->host_sleep_sent) {
+		bt->host_sleep_sent = false;
+		return cen_host_state(bt, false);
+	}
 	return 0;
 }
 
