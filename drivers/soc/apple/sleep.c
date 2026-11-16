@@ -1012,7 +1012,7 @@ static bool apple_sleep_coproc_ready_node(const struct device_node *np)
  * Untested SoCs (apple_sleep_soc.untested): deep sleep offered at all, and the commit allowed.
  * The second is for one sleep at a time: aurora-sleep-test sets it and clears it after.
  */
-static bool sleep_deep;
+static bool sleep_deep = true; /* J813 test kernel: aura's command line is fixed */
 module_param_named(deep, sleep_deep, bool, 0444);
 MODULE_PARM_DESC(deep, "Untested SoC: offer deep sleep in mem_sleep (never the default)");
 static bool sleep_untested_commit;
